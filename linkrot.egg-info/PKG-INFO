@@ -1,0 +1,186 @@
+Metadata-Version: 2.4
+Name: linkrot
+Version: 0.1.0
+Summary: Find dead, moved, and blocked links - CLI and TUI
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.27
+Requires-Dist: textual>=0.80
+
+# linkrot
+
+Find dead, moved, and blocked links in any text: a README, a bookmarks
+export, loose notes, a list of URLs.
+
+It comes as two commands sharing one core:
+
+- `linkrot`: a CLI built for scripts and CI (exit codes, JSON, stdin)
+- `linkrot-tui`: an interactive terminal UI with live results
+
+```
+$ linkrot README.md
+BROKEN   404  https://example.com/old-page  (not found)
+ERROR    ---  https://gone-forever.example/  (domain not found, DNS lookup failed)
+BLOCKED  403  https://some-site.example/  (server refused us; may still work in a browser)
+REDIRECT 200  http://example.com/docs  (permanently moved)
+              -> https://example.com/docs/
+OK       200  https://example.com/
+
+42 links checked: 38 ok, 1 redirect, 1 blocked, 1 broken, 1 error
+```
+
+## The five outcomes (and why there are five, not two)
+
+| Status | Meaning |
+|---|---|
+| **OK** | Answered 2xx directly |
+| **REDIRECT** | Works, but only after being redirected. The address has moved; update it before the redirect itself rots. Marked "permanently moved" when any hop was a 301/308 |
+| **BROKEN** | The server answered and said no: 404, 410, 5xx |
+| **BLOCKED** | 401/403/429 and friends. The server refused *us*, usually because we look like a bot. The page may be perfectly alive for a human |
+| **ERROR** | Never got an HTTP answer: DNS failure, timeout, TLS error, redirect loop. The classic "whole site is gone" |
+
+The split between **BLOCKED** and **BROKEN** is the most important design
+decision here. Naive checkers lump every non-200 together and bury you in
+false alarms from sites that merely dislike scripts. Reporting "I can't
+tell" honestly is more useful than a scary red row that's wrong.
+
+## Install
+
+Needs Python 3.10+.
+
+```bash
+# Recommended on Arch/CachyOS: pipx keeps CLI tools isolated.
+sudo pacman -S python-pipx
+cd link-rot-checker
+pipx install -e .      # -e = editable: edits to the code take effect immediately
+```
+
+Plain pip in a virtualenv also works:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+```
+
+That creates the `linkrot` and `linkrot-tui` commands, runnable from any
+directory. (This replaces the manual `chmod +x` + symlink dance from the
+earlier projects: the `[project.scripts]` section of `pyproject.toml`
+tells the installer to generate those launchers for you.)
+
+## Usage
+
+```bash
+linkrot README.md                    # every link in a file
+linkrot notes.md bookmarks.html      # several files at once
+linkrot https://example.com/a        # URLs given directly
+cat links.txt | linkrot              # stdin
+linkrot README.md --only-bad         # hide OK results
+linkrot README.md --json             # machine-readable
+linkrot README.md --strict           # REDIRECT/BLOCKED also fail the run
+linkrot README.md --timeout 5 --concurrency 50 --per-host 2
+linkrot-tui                          # interactive UI
+```
+
+TUI keys: `Ctrl+R` check, `Ctrl+L` clear, `Ctrl+Q` quit. Paste text into
+the box or type a file path and press Enter to load it. Results stream in
+live, then settle into worst-first order.
+
+### Exit codes (so it can gate CI)
+
+| Code | Meaning |
+|---|---|
+| 0 | No broken links |
+| 1 | At least one BROKEN or ERROR (with `--strict`, also REDIRECT/BLOCKED) |
+| 2 | Bad usage or unreadable input |
+
+Example GitHub Actions step that fails a PR when docs contain dead links:
+
+```yaml
+- run: pipx install . && linkrot README.md docs/*.md --only-bad
+```
+
+## How it works
+
+### Finding URLs in messy text (`extract.py`)
+
+A URL has no clear end marker, and the text around it is full of
+punctuation that looks like part of it:
+
+```
+See https://example.com/page.            <- trailing "." ends the sentence
+[docs](https://example.com/a_(b))        <- final ")" closes the markdown link
+https://en.wikipedia.org/wiki/Foo_(bar)  <- but THIS ")" belongs to the URL
+```
+
+So it matches greedily, then trims: trailing punctuation goes, and a
+trailing `)` is only stripped if it's *unbalanced* (more `)` than `(`),
+which handles the markdown and Wikipedia cases correctly. Duplicates are
+collapsed, so one dead link repeated 20 times is one row.
+
+### Checking one link (`checker.py`)
+
+1. **HEAD first**: asks for headers only, so no page gets downloaded.
+2. **Fall back to GET** if HEAD returns 4xx/5xx. A surprising number of
+   servers mishandle HEAD (answering 405, 403, even 404) while the same
+   URL works fine with GET. Trusting HEAD alone reports healthy pages as
+   dead. The GET is streamed, so only the status line and headers are
+   read, never the body.
+3. **Retry once on timeout** only. Timeouts are often transient; DNS
+   failures and refused connections won't change on retry.
+4. **Classify** (see the table above).
+
+### Checking thousands without being rude (`check_all`)
+
+Two separate limits:
+
+- `--concurrency` (default 20): total requests in flight. One at a time
+  is painfully slow; all at once exhausts file descriptors.
+- `--per-host` (default 3): requests in flight to any *single* site. A
+  README with 80 links to one domain would otherwise hit that server with
+  80 simultaneous requests: impolite, and a fast way to get rate-limited,
+  which would then show up as false BLOCKED results.
+
+An `on_result` callback fires as each link finishes, which is what lets
+the TUI show live progress instead of a frozen screen.
+
+## Limitations (honest ones)
+
+- **Soft 404s.** Some sites answer `200 OK` with a "page not found"
+  message in the body. A status-code checker can't see that; detecting it
+  means reading and judging page content.
+- **JavaScript-rendered pages.** We never run JS, so single-page apps that
+  decide at runtime whether a route exists will look healthy.
+- **`#fragments` aren't verified.** `page.html#section` is checked as
+  `page.html`; whether the anchor exists isn't tested.
+- **BLOCKED is a shrug, not a verdict.** Open those in a browser to be sure.
+- **Only `http(s)://` links** are extracted; relative links (`../docs`) and
+  `mailto:` are ignored, since there's no base to resolve them against.
+
+## Extending it
+
+- **`--base-url` for relative links**: resolve `../docs/x.md`-style links
+  against a site root, so you can check real HTML pages.
+- **Check a live page**: fetch a URL, extract its links, check those
+  (a one-level crawler).
+- **Wayback Machine suggestions**: for each BROKEN link, query the
+  Internet Archive's availability API and print an archived copy. Turns a
+  complaint into a fix.
+- **Result caching**: remember last-checked status so re-runs skip links
+  that were fine an hour ago.
+- **Soft-404 heuristics**: flag 200 responses whose title/body says
+  "not found".
+
+## Project layout
+
+```
+link-rot-checker/
+├── pyproject.toml        # packaging + the two console commands
+├── README.md
+└── linkrot/
+    ├── __init__.py
+    ├── __main__.py       # enables `python -m linkrot`
+    ├── extract.py        # find URLs in messy text
+    ├── checker.py        # async checking + classification (the core)
+    ├── cli.py            # `linkrot`
+    └── tui.py            # `linkrot-tui` (Textual)
+```

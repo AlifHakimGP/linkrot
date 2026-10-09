@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linkrot"
+version = "0.1.0"
+description = "Find dead, moved, and blocked links - CLI and TUI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "textual>=0.80",
+]
+
+[project.scripts]
+linkrot = "linkrot.cli:main"
+linkrot-tui = "linkrot.tui:main"
+
+[tool.setuptools]
+packages = ["linkrot"]

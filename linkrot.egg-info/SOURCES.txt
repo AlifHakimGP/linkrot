@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+linkrot/__init__.py
+linkrot/__main__.py
+linkrot/checker.py
+linkrot/cli.py
+linkrot/extract.py
+linkrot/tui.py
+linkrot.egg-info/PKG-INFO
+linkrot.egg-info/SOURCES.txt
+linkrot.egg-info/dependency_links.txt
+linkrot.egg-info/entry_points.txt
+linkrot.egg-info/requires.txt
+linkrot.egg-info/top_level.txt

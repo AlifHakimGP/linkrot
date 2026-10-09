@@ -1,0 +1,3 @@
+[console_scripts]
+linkrot = linkrot.cli:main
+linkrot-tui = linkrot.tui:main
